@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f766e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="퇴근확인">
+<title>퇴근 확인</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+  :root { --bg:#f4f6f5; --fg:#13201d; --card:#fff; --accent:#0f766e; --ok:#15803d; --warn:#b45309; --err:#b91c1c; --muted:#5b6b66; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1715; --fg:#e8f0ed; --card:#18231f; --accent:#2dd4bf; --ok:#4ade80; --warn:#fbbf24; --err:#f87171; --muted:#93a59f; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--fg);
+         font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif;
+         display:flex; flex-direction:column; align-items:center; justify-content:center;
+         padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom)); }
+  main { width:100%; max-width:420px; text-align:center; }
+  h1 { font-size:1.1rem; font-weight:600; color:var(--muted); margin:0 0 20px; }
+  button#go { width:100%; padding:34px 16px; font-size:1.6rem; font-weight:700; border:0; border-radius:20px;
+              background:var(--accent); color:#fff; cursor:pointer; }
+  button#go:disabled { opacity:.6; }
+  #result { margin-top:24px; background:var(--card); border-radius:16px; padding:20px; min-height:84px;
+            font-size:1.35rem; line-height:1.5; white-space:pre-line; display:none; }
+  #result.ok { color:var(--ok); } #result.warn { color:var(--warn); } #result.err { color:var(--err); }
+  #result.wait { color:var(--muted); }
+  details { margin-top:28px; text-align:left; color:var(--muted); font-size:.9rem; }
+  summary { cursor:pointer; text-align:center; }
+  label { display:block; margin:12px 0 4px; }
+  input { width:100%; padding:10px; font-size:1rem; border-radius:8px; border:1px solid var(--muted); background:var(--card); color:var(--fg); }
+  button.sm { margin-top:12px; padding:10px 16px; border-radius:8px; border:0; background:var(--accent); color:#fff; font-size:1rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>퇴근 지문 찍었나?</h1>
+  <button id="go">확인하기</button>
+  <div id="result" role="status" aria-live="polite"></div>
+
+  <details id="settings">
+    <summary>설정</summary>
+    <label for="req">요청 주제 (-req)</label>
+    <input id="req" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <label for="res">답장 주제 (-res)</label>
+    <input id="res" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button class="sm" id="save">저장</button>
+  </details>
+</main>
+
+<script>
+const SERVER = "https://ntfy.sh";
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k) { try { return localStorage.getItem(k) || ""; } catch { return ""; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+
+// 주소 뒤에 #req=...&res=... 를 붙여 열면 한 번에 설정되고, 주소창에서는 지워진다.
+(function readHash() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  if (h.get("req") && h.get("res")) {
+    store.set("req", h.get("req")); store.set("res", h.get("res"));
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+})();
+
+$("req").value = store.get("req");
+$("res").value = store.get("res");
+if (!store.get("req") || !store.get("res")) $("settings").open = true;
+
+$("save").onclick = () => {
+  store.set("req", $("req").value.trim());
+  store.set("res", $("res").value.trim());
+  $("settings").open = false;
+};
+
+function show(text, cls) {
+  const r = $("result");
+  r.style.display = "block"; r.className = cls; r.textContent = text;
+}
+
+function waitReply(topic, since, ms) {
+  return new Promise((resolve, reject) => {
+    const es = new EventSource(`${SERVER}/${topic}/sse?since=${since}`);
+    const timer = setTimeout(() => { es.close(); reject(new Error("timeout")); }, ms);
+    es.onmessage = (e) => {
+      const m = JSON.parse(e.data);
+      if (m.event !== "message" || m.time < since) return;
+      clearTimeout(timer); es.close(); resolve(m.message);
+    };
+  });
+}
+
+$("go").onclick = async () => {
+  const req = store.get("req"), res = store.get("res");
+  if (!req || !res) { $("settings").open = true; return; }
+  const btn = $("go");
+  btn.disabled = true; btn.textContent = "확인 중...";
+  show("PC에 요청하는 중...", "wait");
+  try {
+    const post = await fetch(`${SERVER}/${req}`, { method: "POST", body: "check" });
+    if (!post.ok) throw new Error("send");
+    const { time } = await post.json();
+    show("PC가 그룹웨어를 확인하는 중...\n(보통 5~15초)", "wait");
+    const msg = await waitReply(res, time, 60000);
+    show(msg, msg.startsWith("✅") ? "ok" : msg.startsWith("⚠") ? "warn" : "err");
+  } catch (e) {
+    show(e.message === "timeout"
+      ? "답장이 없습니다.\nPC가 꺼져 있거나 절전 상태일 수 있어요."
+      : "요청을 보내지 못했습니다.\n인터넷 연결을 확인하세요.", "err");
+  } finally {
+    btn.disabled = false; btn.textContent = "다시 확인하기";
+  }
+};
+</script>
+</body>
+</html>
